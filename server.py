@@ -269,6 +269,108 @@ def voice_conversation():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/youtube", methods=["POST"])
+def load_youtube():
+    """Extract YouTube video ID and download subtitles only."""
+    import subprocess
+    import json as json_mod
+
+    data = request.json
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "No URL provided"}), 400
+
+    try:
+        # Extract video ID from URL
+        video_id = None
+        patterns = [
+            r'(?:v=|/v/|youtu\.be/)([a-zA-Z0-9_-]{11})',
+            r'(?:embed/)([a-zA-Z0-9_-]{11})',
+        ]
+        for p in patterns:
+            m = re.search(p, url)
+            if m:
+                video_id = m.group(1)
+                break
+
+        if not video_id:
+            return jsonify({"error": "Could not extract YouTube video ID"}), 400
+
+        # Download subtitles only using yt-dlp
+        subs_dir = os.path.join(VIDEO_DIR, "yt_subs")
+        os.makedirs(subs_dir, exist_ok=True)
+
+        # Try to get English subtitles (manual first, then auto-generated)
+        srt_path = os.path.join(subs_dir, f"{video_id}.srt")
+
+        if not os.path.exists(srt_path):
+            # Try manual English subs first
+            result = subprocess.run([
+                "yt-dlp",
+                "--skip-download",
+                "--write-sub",
+                "--sub-lang", "en",
+                "--sub-format", "srt",
+                "--convert-subs", "srt",
+                "-o", os.path.join(subs_dir, f"{video_id}.%(ext)s"),
+                url
+            ], capture_output=True, text=True, timeout=30)
+
+            # Check if srt was created
+            possible = os.path.join(subs_dir, f"{video_id}.en.srt")
+            if os.path.exists(possible):
+                os.rename(possible, srt_path)
+            else:
+                # Try auto-generated subs
+                result = subprocess.run([
+                    "yt-dlp",
+                    "--skip-download",
+                    "--write-auto-sub",
+                    "--sub-lang", "en",
+                    "--sub-format", "srt",
+                    "--convert-subs", "srt",
+                    "-o", os.path.join(subs_dir, f"{video_id}.%(ext)s"),
+                    url
+                ], capture_output=True, text=True, timeout=30)
+
+                possible = os.path.join(subs_dir, f"{video_id}.en.srt")
+                if os.path.exists(possible):
+                    os.rename(possible, srt_path)
+
+        # Get video title
+        title_result = subprocess.run([
+            "yt-dlp", "--get-title", url
+        ], capture_output=True, text=True, timeout=15)
+        title = title_result.stdout.strip() or video_id
+
+        has_subs = os.path.exists(srt_path)
+
+        return jsonify({
+            "video_id": video_id,
+            "title": title,
+            "has_subtitles": has_subs,
+            "srt_file": f"yt_subs/{video_id}.srt" if has_subs else "",
+        })
+
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "yt-dlp timed out"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/subtitles/yt_subs/<path:filename>")
+def get_yt_subtitles(filename):
+    """Return parsed YouTube subtitles as JSON."""
+    filepath = os.path.join(VIDEO_DIR, "yt_subs", filename)
+    if not os.path.isfile(filepath):
+        return jsonify({"error": "not found"}), 404
+    subs = parse_srt(filepath)
+    return jsonify([
+        {"index": s.index, "start": s.start_seconds, "end": s.end_seconds, "text": s.text}
+        for s in subs
+    ])
+
+
 if __name__ == "__main__":
     print("Starting HeyTutor...")
     print("Open http://127.0.0.1:5000 in Chrome or Edge")

@@ -297,6 +297,10 @@
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
 
+        /* YouTube player */
+        #ytPlayerContainer { width: 100%; }
+        #ytPlayerContainer iframe { width: 100%; aspect-ratio: 16/9; border-radius: 8px; }
+
         /* Markdown-like rendering */
         .explain-box p { margin-bottom: 8px; }
         .explain-box strong { color: #ff8a8a; }
@@ -309,16 +313,20 @@
 <div class="header">
     <h1>HeyTutor</h1>
     <div class="header-controls">
-        <label style="font-size:12px;color:#888;">Video:</label>
-        <select id="videoSelect" onchange="loadVideo()">
+        <input type="text" id="youtubeUrl" placeholder="Paste YouTube URL..."
+               style="width:400px;padding:6px 10px;border:1px solid #333;border-radius:6px;background:#262730;color:#e0e0e0;font-size:13px;"
+               onkeydown="if(event.key==='Enter')loadYouTube()">
+        <button onclick="loadYouTube()" style="padding:6px 12px;border:1px solid #333;border-radius:6px;background:#ff4b4b;color:#fff;cursor:pointer;font-size:12px;">Load</button>
+        <!-- Hidden selects for local files (kept for future use) -->
+        <select id="videoSelect" style="display:none;">
+            <option value="">-- select --</option>
             {% for v in videos %}
-            <option value="{{ v }}">{{ v[:60] }}</option>
+            <option value="{{ v }}">{{ v[:40] }}</option>
             {% endfor %}
         </select>
-        <label style="font-size:12px;color:#888;">Subtitles:</label>
-        <select id="srtSelect" onchange="loadSubtitles()">
+        <select id="srtSelect" style="display:none;">
             {% for s in srts %}
-            <option value="{{ s }}">{{ s[:60] }}</option>
+            <option value="{{ s }}">{{ s[:40] }}</option>
             {% endfor %}
         </select>
         <button onclick="togglePanel()" id="panelToggle" style="padding:6px 12px;border:1px solid #333;border-radius:6px;background:#262730;color:#e0e0e0;cursor:pointer;font-size:12px;">Hide Panel</button>
@@ -328,9 +336,14 @@
 <div class="main">
     <!-- Left: Video Player -->
     <div class="left-panel">
-        <video id="video" preload="metadata"></video>
+        <video id="video" preload="metadata" style="display:none;"></video>
+        <div id="ytPlayerContainer">
+            <div id="ytPlayer" style="width:100%;aspect-ratio:16/9;background:#000;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#666;font-size:16px;">
+                Paste a YouTube URL above and click Load
+            </div>
+        </div>
 
-        <div class="progress-container" id="progressContainer">
+        <div class="progress-container" id="progressContainer" style="display:none;">
             <div class="progress-track">
                 <div class="progress-buffered" id="progressBuffered"></div>
                 <div class="progress-filled" id="progressFilled"></div>
@@ -371,20 +384,12 @@
     <div class="right-panel">
         <div class="tab-bar">
             <button class="active" onclick="switchTab('subtitles', this)">Subtitles</button>
-            <button onclick="switchTab('explanation', this)">Explanation</button>
             <button onclick="switchTab('chat', this)">Chat</button>
         </div>
         <div class="tab-content">
             <!-- Subtitles Tab -->
             <div class="tab-pane active" id="tab-subtitles">
                 <div class="sub-list" id="subList"></div>
-            </div>
-
-            <!-- Explanation Tab -->
-            <div class="tab-pane" id="tab-explanation">
-                <div class="explain-box" id="explainBox">
-                    <p style="color:#666;">Click "Explain" on any subtitle to see a bilingual breakdown.</p>
-                </div>
             </div>
 
             <!-- Chat Tab -->
@@ -413,13 +418,19 @@
     const voiceBtn = document.getElementById('voiceBtn');
     const voiceLog = document.getElementById('voiceLog');
     const subList = document.getElementById('subList');
-    const explainBox = document.getElementById('explainBox');
     const chatMessages = document.getElementById('chatMessages');
 
     let subtitles = [];
     let currentSubIndex = -1;
     let isLooping = false;
     let loopStart = 0, loopEnd = 0;
+
+    // YouTube state
+    let ytPlayer = null;
+    let isYouTubeMode = false;
+    let ytTimeInterval = null;
+    let ytApiReady = false;
+    let currentSrtFile = document.getElementById('srtSelect').value || '';
     const progressContainer = document.getElementById('progressContainer');
     const progressFilled = document.getElementById('progressFilled');
     const progressBuffered = document.getElementById('progressBuffered');
@@ -442,16 +453,131 @@
     const SILENCE_TIMEOUT = 2000;
 
     // --- Init ---
-    loadVideo();
+    isYouTubeMode = true; // Default to YouTube mode
 
-    function loadVideo() {
+    function loadLocalVideo() {
         const name = document.getElementById('videoSelect').value;
+        if (!name) return;
+        isYouTubeMode = false;
+        video.style.display = '';
+        document.getElementById('ytPlayerContainer').style.display = 'none';
+        progressContainer.style.display = '';
+        if (ytTimeInterval) { clearInterval(ytTimeInterval); ytTimeInterval = null; }
         video.src = '/video/' + encodeURIComponent(name);
         loadSubtitles();
     }
 
+    function loadYouTube() {
+        const url = document.getElementById('youtubeUrl').value.trim();
+        if (!url) return;
+
+        voiceStatus.textContent = 'Loading YouTube video...';
+
+        fetch('/youtube', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                voiceStatus.textContent = 'Error: ' + data.error;
+                return;
+            }
+
+            isYouTubeMode = true;
+            video.style.display = 'none';
+            video.pause();
+            document.getElementById('ytPlayerContainer').style.display = '';
+            progressContainer.style.display = 'none';
+
+            // Load YouTube IFrame player
+            if (ytPlayer) {
+                ytPlayer.loadVideoById(data.video_id);
+            } else if (ytApiReady) {
+                createYTPlayer(data.video_id);
+            } else {
+                // Load YouTube API script
+                window._pendingVideoId = data.video_id;
+                const tag = document.createElement('script');
+                tag.src = 'https://www.youtube.com/iframe_api';
+                document.head.appendChild(tag);
+            }
+
+            // Load subtitles
+            if (data.has_subtitles) {
+                currentSrtFile = data.srt_file;
+                fetch('/subtitles/' + encodeURIComponent(data.srt_file))
+                    .then(r => r.json())
+                    .then(subs => {
+                        subtitles = subs;
+                        renderSubList();
+                    });
+            } else {
+                currentSrtFile = '';
+                subtitles = [];
+                renderSubList();
+                voiceStatus.textContent = 'No subtitles available for this video.';
+            }
+
+            voiceStatus.textContent = 'Loaded: ' + data.title;
+        })
+        .catch(err => {
+            voiceStatus.textContent = 'Error: ' + err.message;
+        });
+    }
+
+    function createYTPlayer(videoId) {
+        ytPlayer = new YT.Player('ytPlayer', {
+            videoId: videoId,
+            playerVars: { autoplay: 0, modestbranding: 1, rel: 0 },
+            events: {
+                onReady: () => { startYTTimeUpdater(); },
+                onStateChange: (e) => {
+                    if (e.data === YT.PlayerState.PLAYING) playBtn.textContent = 'Pause';
+                    else if (e.data === YT.PlayerState.PAUSED) playBtn.textContent = 'Play';
+                }
+            }
+        });
+    }
+
+    // YouTube API callback
+    window.onYouTubeIframeAPIReady = function() {
+        ytApiReady = true;
+        if (window._pendingVideoId) {
+            createYTPlayer(window._pendingVideoId);
+            window._pendingVideoId = null;
+        }
+    };
+
+    function startYTTimeUpdater() {
+        if (ytTimeInterval) clearInterval(ytTimeInterval);
+        ytTimeInterval = setInterval(() => {
+            if (!ytPlayer || !isYouTubeMode) return;
+            const t = ytPlayer.getCurrentTime() || 0;
+            const dur = ytPlayer.getDuration() || 0;
+            timeDisplay.textContent = fmt(t) + ' / ' + fmt(dur);
+
+            if (isLooping && t >= loopEnd) {
+                ytPlayer.seekTo(loopStart, true);
+            }
+
+            // Find current subtitle
+            let found = -1;
+            for (let i = 0; i < subtitles.length; i++) {
+                if (t >= subtitles[i].start && t <= subtitles[i].end) { found = i; break; }
+            }
+            if (found !== currentSubIndex) {
+                currentSubIndex = found;
+                updateOverlay();
+                highlightSubItem();
+            }
+        }, 250);
+    }
+
     function loadSubtitles() {
         const name = document.getElementById('srtSelect').value;
+        currentSrtFile = name;
         fetch('/subtitles/' + encodeURIComponent(name))
             .then(r => r.json())
             .then(data => {
@@ -460,16 +586,47 @@
             });
     }
 
-    // --- Playback ---
-    function togglePlay() {
-        if (video.paused) { video.play(); } else { video.pause(); }
-    }
-    video.addEventListener('play', () => { playBtn.textContent = 'Pause'; });
-    video.addEventListener('pause', () => { playBtn.textContent = 'Play'; });
+    function getSrtFile() { return currentSrtFile; }
 
-    function rewind() { video.currentTime = Math.max(0, video.currentTime - 5); }
-    function forward() { video.currentTime = Math.min(video.duration || 0, video.currentTime + 5); }
-    function setSpeed(s) { video.playbackRate = parseFloat(s); }
+    // --- Unified playback controls (work for both local and YouTube) ---
+    function getTime() {
+        return isYouTubeMode ? (ytPlayer ? ytPlayer.getCurrentTime() : 0) : video.currentTime;
+    }
+    function getDuration() {
+        return isYouTubeMode ? (ytPlayer ? ytPlayer.getDuration() : 0) : (video.duration || 0);
+    }
+    function seekTo(t) {
+        if (isYouTubeMode && ytPlayer) { ytPlayer.seekTo(t, true); }
+        else { video.currentTime = t; }
+    }
+    function playVideo() {
+        if (isYouTubeMode && ytPlayer) { ytPlayer.playVideo(); }
+        else { video.play(); }
+        playBtn.textContent = 'Pause';
+    }
+    function pauseVideo() {
+        if (isYouTubeMode && ytPlayer) { ytPlayer.pauseVideo(); }
+        else { video.pause(); }
+        playBtn.textContent = 'Play';
+    }
+    function isVideoPaused() {
+        if (isYouTubeMode && ytPlayer) { return ytPlayer.getPlayerState() !== YT.PlayerState.PLAYING; }
+        return video.paused;
+    }
+
+    function togglePlay() {
+        if (isVideoPaused()) { playVideo(); } else { pauseVideo(); }
+    }
+    video.addEventListener('play', () => { if (!isYouTubeMode) playBtn.textContent = 'Pause'; });
+    video.addEventListener('pause', () => { if (!isYouTubeMode) playBtn.textContent = 'Play'; });
+
+    function rewind() { seekTo(Math.max(0, getTime() - 5)); }
+    function forward() { seekTo(Math.min(getDuration(), getTime() + 5)); }
+    function setSpeed(s) {
+        const speed = parseFloat(s);
+        if (isYouTubeMode && ytPlayer) { ytPlayer.setPlaybackRate(speed); }
+        else { video.playbackRate = speed; }
+    }
 
     function toggleLoop() {
         if (isLooping) {
@@ -492,8 +649,8 @@
             loopEnd = subtitles[idx].end;
             loopBtn.textContent = 'Loop On';
             loopBtn.classList.add('active');
-            video.currentTime = loopStart;
-            video.play();
+            seekTo(loopStart);
+            playVideo();
         }
     }
 
@@ -505,6 +662,7 @@
     }
 
     video.addEventListener('timeupdate', () => {
+        if (isYouTubeMode) return;
         const t = video.currentTime;
         timeDisplay.textContent = fmt(t) + ' / ' + fmt(video.duration || 0);
 
@@ -611,17 +769,19 @@
 
     function jumpTo(idx) {
         if (idx >= 0 && idx < subtitles.length) {
-            video.currentTime = subtitles[idx].start;
-            video.play();
+            seekTo(subtitles[idx].start);
+            playVideo();
         }
     }
 
-    // --- Explain ---
+    // --- Explain (via chat) ---
     function explainSub(idx) {
-        switchTab('explanation', document.querySelectorAll('.tab-bar button')[1]);
-        explainBox.innerHTML = '<p class="loading">Generating explanation...</p>';
+        switchTab('chat', document.querySelectorAll('.tab-bar button')[1]);
+        const subText = subtitles[idx].text;
+        addChatMsg('user', 'Explain: ' + escHtml(subText));
+        addChatMsg('assistant', '<span class="loading">Thinking...</span>');
 
-        const srtFile = document.getElementById('srtSelect').value;
+        const srtFile = getSrtFile();
         fetch('/explain', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -629,10 +789,14 @@
         })
         .then(r => r.json())
         .then(data => {
-            explainBox.innerHTML = renderMarkdown(data.explanation);
+            chatMessages.removeChild(chatMessages.lastChild);
+            addChatMsg('assistant', renderMarkdown(data.explanation));
+            chatHistory.push({ role: 'user', content: 'Explain: ' + subText });
+            chatHistory.push({ role: 'assistant', content: data.explanation });
         })
         .catch(err => {
-            explainBox.innerHTML = '<p style="color:#ff4b4b;">Error: ' + err.message + '</p>';
+            chatMessages.removeChild(chatMessages.lastChild);
+            addChatMsg('assistant', '<span style="color:#ff4b4b;">Error: ' + err.message + '</span>');
         });
     }
 
@@ -645,7 +809,7 @@
 
         addChatMsg('user', question);
 
-        const srtFile = document.getElementById('srtSelect').value;
+        const srtFile = getSrtFile();
         addChatMsg('assistant', '<span class="loading">Thinking...</span>');
 
         fetch('/chat', {
@@ -797,7 +961,7 @@
             const mins = parseInt(jumpMatch[1]);
             const secs = jumpMatch[2] ? parseInt(jumpMatch[2]) : 0;
             const targetTime = mins * 60 + secs;
-            video.currentTime = Math.min(targetTime, video.duration || 0);
+            seekTo(Math.min(targetTime, getDuration()));
             logVoice('Jumped to ' + fmt(targetTime));
             voiceStatus.textContent = 'Jumped to ' + fmt(targetTime);
             return;
@@ -806,7 +970,7 @@
         const jumpSecsMatch = text.match(/(?:jump|go|skip)\s*to\s*(\d+)\s*seconds?/);
         if (jumpSecsMatch) {
             const targetTime = parseInt(jumpSecsMatch[1]);
-            video.currentTime = Math.min(targetTime, video.duration || 0);
+            seekTo(Math.min(targetTime, getDuration()));
             logVoice('Jumped to ' + fmt(targetTime));
             voiceStatus.textContent = 'Jumped to ' + fmt(targetTime);
             return;
@@ -817,7 +981,7 @@
         if (speedMatch) {
             const speed = parseFloat(speedMatch[1]);
             if (speed >= 0.25 && speed <= 3) {
-                video.playbackRate = speed;
+                setSpeed(speed);
                 logVoice('Speed: ' + speed + 'x');
                 voiceStatus.textContent = 'Speed: ' + speed + 'x';
                 return;
@@ -847,9 +1011,10 @@
         }
 
         if (isWakeWord) {
+            dingWakeWord();
             if (questionPart.length > 3) {
                 // Wake word + question in one sentence — send directly to server
-                video.pause();
+                pauseVideo();
                 handleQuestionText(questionPart);
             } else {
                 // Just wake word — start recording for the question
@@ -868,7 +1033,7 @@
         voiceDot.classList.remove('listening');
         voiceDot.classList.add('heard');
         voiceStatus.textContent = 'Ask your question now...';
-        video.pause();
+        pauseVideo();
 
         try {
             const stream = await initMic();
@@ -929,6 +1094,7 @@
 
         voiceDot.classList.remove('heard');
         voiceStatus.textContent = 'Processing with Whisper...';
+        dingProcessing();
 
         mediaRecorder.onstop = async () => {
             const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
@@ -943,7 +1109,7 @@
     }
 
     async function sendVoiceToWhisper(audioBlob) {
-        const srtFile = document.getElementById('srtSelect').value;
+        const srtFile = getSrtFile();
         const subIdx = currentSubIndex >= 0 ? subtitles[currentSubIndex].index : -1;
 
         const formData = new FormData();
@@ -981,7 +1147,7 @@
 
     async function handleQuestionText(question) {
         // Send text question directly (no Whisper needed, already transcribed by Web Speech API)
-        const srtFile = document.getElementById('srtSelect').value;
+        const srtFile = getSrtFile();
         const subIdx = currentSubIndex >= 0 ? subtitles[currentSubIndex].index : -1;
 
         voiceStatus.textContent = 'Thinking...';
@@ -1001,7 +1167,7 @@
                 return;
             }
 
-            switchTab('chat', document.querySelectorAll('.tab-bar button')[2]);
+            switchTab('chat', document.querySelectorAll('.tab-bar button')[1]);
             addChatMsg('user', escHtml(question));
             addChatMsg('assistant', renderMarkdown(data.answer));
             chatHistory.push({ role: 'user', content: question });
@@ -1014,7 +1180,7 @@
     }
 
     function showResponse(data) {
-        switchTab('chat', document.querySelectorAll('.tab-bar button')[2]);
+        switchTab('chat', document.querySelectorAll('.tab-bar button')[1]);
         addChatMsg('user', escHtml(data.user_text));
         addChatMsg('assistant', renderMarkdown(data.response_text));
         chatHistory.push({ role: 'user', content: data.user_text });
@@ -1040,22 +1206,51 @@
         }
     }
 
+    // --- Sound effects ---
+    function playDing(freq = 800, duration = 0.15) {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = freq;
+        osc.type = 'sine';
+        gain.gain.setValueAtTime(0.3, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + duration);
+        osc.start();
+        osc.stop(ctx.currentTime + duration);
+    }
+
+    function dingCommand() { playDing(800, 0.12); }
+
+    function dingWakeWord() {
+        playDing(600, 0.1);
+        setTimeout(() => playDing(900, 0.15), 120);
+    }
+
+    function dingProcessing() {
+        playDing(500, 0.08);
+        setTimeout(() => playDing(500, 0.08), 100);
+        setTimeout(() => playDing(700, 0.12), 200);
+    }
+
     function handleCommand(cmd) {
+        dingCommand();
         switch (cmd) {
-            case 'STOP':  video.pause(); voiceStatus.textContent = 'Paused'; break;
-            case 'PLAY':  video.play();  voiceStatus.textContent = 'Playing'; break;
+            case 'STOP':  pauseVideo(); voiceStatus.textContent = 'Paused'; break;
+            case 'PLAY':  playVideo();  voiceStatus.textContent = 'Playing'; break;
             case 'REWIND': rewind();     voiceStatus.textContent = 'Rewound 5s'; break;
             case 'FORWARD': forward();   voiceStatus.textContent = 'Forward 5s'; break;
             case 'LOOP':
                 if (currentSubIndex >= 0) { loopSentence(currentSubIndex); voiceStatus.textContent = 'Looping sentence'; }
                 break;
             case 'SLOWER':
-                video.playbackRate = Math.max(0.25, video.playbackRate - 0.25);
-                voiceStatus.textContent = 'Speed: ' + video.playbackRate + 'x';
+                setSpeed(Math.max(0.25, (isYouTubeMode && ytPlayer ? ytPlayer.getPlaybackRate() : video.playbackRate) - 0.25));
+                voiceStatus.textContent = 'Speed adjusted';
                 break;
             case 'FASTER':
-                video.playbackRate = Math.min(2, video.playbackRate + 0.25);
-                voiceStatus.textContent = 'Speed: ' + video.playbackRate + 'x';
+                setSpeed(Math.min(2, (isYouTubeMode && ytPlayer ? ytPlayer.getPlaybackRate() : video.playbackRate) + 0.25));
+                voiceStatus.textContent = 'Speed adjusted';
                 break;
         }
     }
