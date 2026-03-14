@@ -186,6 +186,14 @@
             flex-direction: column;
             border-left: 1px solid #2a2a3a;
             min-width: 0;
+            transition: flex 0.3s, opacity 0.3s, width 0.3s;
+        }
+        .right-panel.hidden {
+            flex: 0;
+            width: 0;
+            opacity: 0;
+            overflow: hidden;
+            border-left: none;
         }
 
         .tab-bar {
@@ -313,6 +321,7 @@
             <option value="{{ s }}">{{ s[:60] }}</option>
             {% endfor %}
         </select>
+        <button onclick="togglePanel()" id="panelToggle" style="padding:6px 12px;border:1px solid #333;border-radius:6px;background:#262730;color:#e0e0e0;cursor:pointer;font-size:12px;">Hide Panel</button>
     </div>
 </div>
 
@@ -665,6 +674,14 @@
                          <div class="chat-bubble">${html}</div>`;
         chatMessages.appendChild(div);
         chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    // --- Panel toggle ---
+    function togglePanel() {
+        const panel = document.querySelector('.right-panel');
+        const btn = document.getElementById('panelToggle');
+        panel.classList.toggle('hidden');
+        btn.textContent = panel.classList.contains('hidden') ? 'Show Panel' : 'Hide Panel';
     }
 
     // --- Tabs ---
