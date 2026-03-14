@@ -237,8 +237,21 @@ def voice_conversation():
                             "audio_base64": audio_b64,
                         })
 
-        # 4. General conversation
-        response_text = chat_about_content(client, MODEL, user_text, context_subs, history)
+        # 4. General conversation — include nearby subtitles for context
+        nearby_subs = []
+        current_idx = int(current_sub_index)
+        if current_idx >= 0 and srt_file:
+            filepath = os.path.join(VIDEO_DIR, srt_file)
+            if os.path.isfile(filepath):
+                subs = parse_srt(filepath)
+                for i, s in enumerate(subs):
+                    if s.index == current_idx:
+                        start = max(0, i - 5)
+                        end = min(len(subs), i + 3)
+                        nearby_subs = subs[start:end]
+                        break
+
+        response_text = chat_about_content(client, MODEL, user_text, context_subs, history, nearby_subs)
 
         # 5. TTS
         tts_bytes = text_to_speech(client, response_text)

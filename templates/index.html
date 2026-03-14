@@ -346,7 +346,7 @@
 
         <div class="voice-bar">
             <div class="voice-dot" id="voiceDot"></div>
-            <span id="voiceStatus">Click "Enable Hands-Free" to start. Say <strong>"hey tutor"</strong> to talk.</span>
+            <span id="voiceStatus">Click "Enable Hands-Free" to start. Commands are instant; say "hey tutor" for questions.</span>
             <button onclick="toggleHandsFree()" id="voiceBtn" style="min-width:140px;">Enable Hands-Free</button>
         </div>
         <audio id="ttsAudio" style="display:none;"></audio>
@@ -428,9 +428,9 @@
 
     // Hands-free state
     let handsFreeActive = false;
-    let wakeWordRecognition = null;
+    let recognition = null;
     let silenceTimer = null;
-    const SILENCE_TIMEOUT = 2000; // stop recording after 2s of silence
+    const SILENCE_TIMEOUT = 2000;
 
     // --- Init ---
     loadVideo();
@@ -675,16 +675,15 @@
         if (btn) btn.classList.add('active');
     }
 
-    // --- Hands-Free Voice Conversation ---
-    // Flow: Web Speech API listens for "hey tutor" wake word →
-    //       MediaRecorder captures your question →
-    //       Auto-stops after 2s silence →
-    //       Whisper transcribes → GPT responds → TTS speaks back →
-    //       Resumes wake word listening
+    // --- Hybrid Hands-Free Voice Control ---
+    // Web Speech API: instant local commands (stop, play, rewind, repeat, etc.)
+    // Whisper API: accurate transcription for questions (triggered by "hey tutor")
 
     async function initMic() {
         if (!micStream) {
-            micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            micStream = await navigator.mediaDevices.getUserMedia({
+                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+            });
         }
         return micStream;
     }
@@ -704,182 +703,229 @@
         }
         handsFreeActive = true;
         voiceBtn.textContent = 'Disable Hands-Free';
-        startWakeWordListener();
+        startSpeechListener();
     }
 
     function disableHandsFree() {
         handsFreeActive = false;
-        if (wakeWordRecognition) {
-            wakeWordRecognition.abort();
-            wakeWordRecognition = null;
-        }
-        if (isRecording && mediaRecorder) {
-            mediaRecorder.stop();
-            isRecording = false;
-        }
+        if (recognition) { recognition.abort(); recognition = null; }
+        if (isRecording && mediaRecorder) { mediaRecorder.stop(); isRecording = false; }
+        clearTimeout(silenceTimer);
         voiceDot.classList.remove('listening');
         voiceDot.classList.remove('heard');
         voiceStatus.textContent = 'Hands-free disabled';
         voiceBtn.textContent = 'Enable Hands-Free';
     }
 
-    function startWakeWordListener() {
+    function startSpeechListener() {
         if (!handsFreeActive) return;
 
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-        wakeWordRecognition = new SR();
-        wakeWordRecognition.continuous = true;
-        wakeWordRecognition.interimResults = false;
-        wakeWordRecognition.lang = 'en-US';
+        recognition = new SR();
+        recognition.continuous = true;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
 
-        wakeWordRecognition.onstart = () => {
+        recognition.onstart = () => {
             voiceDot.classList.add('listening');
-            voiceStatus.innerHTML = 'Listening for <strong>"hey tutor"</strong>... (use headphones for best results)';
+            voiceStatus.textContent = 'Listening... commands are instant, say "hey tutor" for questions';
         };
 
-        wakeWordRecognition.onresult = (e) => {
+        recognition.onresult = (e) => {
             for (let i = e.resultIndex; i < e.results.length; i++) {
-                if (e.results[i].isFinal) {
-                    const text = e.results[i][0].transcript.trim().toLowerCase();
-                    logVoice('Heard: "' + text + '"');
-
-                    // Check for wake word
-                    if (text.includes('hey tutor') || text.includes('a tutor') ||
-                        text.includes('hey tuter') || text.includes('hey tudor')) {
-                        // Wake word detected!
-                        wakeWordRecognition.abort();
-                        wakeWordRecognition = null;
-                        onWakeWordDetected();
-                        return;
-                    }
-
-                    // Also detect direct simple commands without wake word
-                    const simpleCommands = ['stop', 'pause', 'play', 'rewind', 'repeat'];
-                    for (const cmd of simpleCommands) {
-                        if (text === cmd || text === cmd + '.') {
-                            handleCommand(cmd === 'stop' || cmd === 'pause' ? 'STOP' :
-                                          cmd === 'play' ? 'PLAY' :
-                                          cmd === 'rewind' ? 'REWIND' : 'LOOP');
-                            return;
-                        }
-                    }
-                }
+                if (!e.results[i].isFinal) continue;
+                const text = e.results[i][0].transcript.trim().toLowerCase();
+                logVoice('Heard: "' + text + '"');
+                processVoiceInput(text);
             }
         };
 
-        wakeWordRecognition.onerror = (e) => {
+        recognition.onerror = (e) => {
             if (e.error === 'no-speech' || e.error === 'aborted') return;
-            logVoice('Wake word error: ' + e.error);
+            logVoice('Error: ' + e.error);
         };
 
-        wakeWordRecognition.onend = () => {
-            // Auto-restart if still active
+        recognition.onend = () => {
             if (handsFreeActive && !isRecording) {
-                setTimeout(() => startWakeWordListener(), 100);
+                setTimeout(() => startSpeechListener(), 100);
             }
         };
 
-        wakeWordRecognition.start();
+        recognition.start();
     }
 
-    async function onWakeWordDetected() {
-        logVoice('Wake word detected!');
+    function processVoiceInput(text) {
+        // 1. Check for instant playback commands (no API call needed)
+        const commands = {
+            'stop': 'STOP', 'pause': 'STOP', 'hold': 'STOP', 'wait': 'STOP',
+            'play': 'PLAY', 'go': 'PLAY', 'continue': 'PLAY', 'resume': 'PLAY', 'start': 'PLAY',
+            'rewind': 'REWIND', 'back': 'REWIND', 'go back': 'REWIND', 'behind': 'REWIND',
+            'forward': 'FORWARD', 'skip': 'FORWARD', 'next': 'FORWARD',
+            'repeat': 'LOOP', 'loop': 'LOOP', 'again': 'LOOP', 'one more time': 'LOOP',
+            'slower': 'SLOWER', 'slow down': 'SLOWER', 'slow': 'SLOWER',
+            'faster': 'FASTER', 'speed up': 'FASTER', 'fast': 'FASTER',
+        };
+
+        for (const [phrase, cmd] of Object.entries(commands)) {
+            if (text === phrase || text === phrase + '.' ||
+                text.startsWith(phrase + ' ') || text.startsWith(phrase + ',')) {
+                handleCommand(cmd);
+                return;
+            }
+        }
+
+        // 2. Check for time jump — "jump to 2 minutes", "go to 1:30", "go to 90 seconds"
+        const jumpMatch = text.match(/(?:jump|go|skip)\s*to\s*(\d+)\s*(?::|minutes?\s*(?:and)?\s*)(\d+)?\s*(?:seconds?)?/);
+        if (jumpMatch) {
+            const mins = parseInt(jumpMatch[1]);
+            const secs = jumpMatch[2] ? parseInt(jumpMatch[2]) : 0;
+            const targetTime = mins * 60 + secs;
+            video.currentTime = Math.min(targetTime, video.duration || 0);
+            logVoice('Jumped to ' + fmt(targetTime));
+            voiceStatus.textContent = 'Jumped to ' + fmt(targetTime);
+            return;
+        }
+        // Also handle "go to X seconds"
+        const jumpSecsMatch = text.match(/(?:jump|go|skip)\s*to\s*(\d+)\s*seconds?/);
+        if (jumpSecsMatch) {
+            const targetTime = parseInt(jumpSecsMatch[1]);
+            video.currentTime = Math.min(targetTime, video.duration || 0);
+            logVoice('Jumped to ' + fmt(targetTime));
+            voiceStatus.textContent = 'Jumped to ' + fmt(targetTime);
+            return;
+        }
+
+        // 3. Check for specific speed — "speed 0.5", "set speed to 1.5", "play at 0.75"
+        const speedMatch = text.match(/(?:speed|rate|play\s*at)\s*(?:to\s*)?(\d+\.?\d*)\s*x?/);
+        if (speedMatch) {
+            const speed = parseFloat(speedMatch[1]);
+            if (speed >= 0.25 && speed <= 3) {
+                video.playbackRate = speed;
+                logVoice('Speed: ' + speed + 'x');
+                voiceStatus.textContent = 'Speed: ' + speed + 'x';
+                return;
+            }
+        }
+
+        // 4. Check for wake word — very relaxed matching for accents
+        const wakePatterns = [
+            'hey tutor', 'a tutor', 'hey tuter', 'hey tudor', 'hey teacher',
+            'hey to her', 'hey tater', 'hey twitter', 'hey tuner', 'hey tumor',
+            'hey tour', 'hey too', 'hey tu', 'tutor', 'hi tutor', 'hello tutor',
+            'hey dude', 'hey do', 'eight tutor', 'a tooter', 'hey cooter',
+            'heyuter', 'hey to the', 'hey total', 'hey two to'
+        ];
+
+        let isWakeWord = false;
+        let questionPart = '';
+
+        for (const pattern of wakePatterns) {
+            if (text.includes(pattern)) {
+                isWakeWord = true;
+                // Extract the question after the wake word
+                const idx = text.indexOf(pattern) + pattern.length;
+                questionPart = text.substring(idx).replace(/^[\s,\.]+/, '');
+                break;
+            }
+        }
+
+        if (isWakeWord) {
+            if (questionPart.length > 3) {
+                // Wake word + question in one sentence — send directly to server
+                video.pause();
+                handleQuestionText(questionPart);
+            } else {
+                // Just wake word — start recording for the question
+                recognition.abort();
+                recognition = null;
+                startQuestionRecording();
+            }
+            return;
+        }
+
+        // 3. Not a command, not a wake word — ignore
+    }
+
+    async function startQuestionRecording() {
+        logVoice('Activated! Listening for your question...');
         voiceDot.classList.remove('listening');
         voiceDot.classList.add('heard');
-        voiceStatus.textContent = 'Listening to your question... (speak now)';
-
-        // Pause the video
+        voiceStatus.textContent = 'Ask your question now...';
         video.pause();
 
-        // Start recording with MediaRecorder
         try {
             const stream = await initMic();
             audioChunks = [];
             mediaRecorder = new MediaRecorder(stream);
             mediaRecorder.ondataavailable = (e) => { audioChunks.push(e.data); };
-
-            // Use silence detection via Web Speech API to know when user stops talking
-            const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-            const silenceDetector = new SR();
-            silenceDetector.continuous = true;
-            silenceDetector.interimResults = true;
-            silenceDetector.lang = 'en-US';
-
-            silenceDetector.onresult = () => {
-                // User is still talking — reset silence timer
-                clearTimeout(silenceTimer);
-                silenceTimer = setTimeout(() => {
-                    // Silence detected — stop recording
-                    silenceDetector.abort();
-                    finishRecording();
-                }, SILENCE_TIMEOUT);
-            };
-
-            silenceDetector.onerror = (e) => {
-                if (e.error === 'no-speech') {
-                    // No speech at all — stop after timeout
-                    setTimeout(() => {
-                        silenceDetector.abort();
-                        finishRecording();
-                    }, SILENCE_TIMEOUT);
-                }
-            };
-
-            silenceDetector.onend = () => {
-                // If it ends unexpectedly, finish recording
-                if (isRecording) {
-                    clearTimeout(silenceTimer);
-                    finishRecording();
-                }
-            };
-
             mediaRecorder.start();
             isRecording = true;
             recordingStartTime = Date.now();
-            silenceDetector.start();
 
-            // Safety timeout: max 30 seconds recording
-            setTimeout(() => {
-                if (isRecording) {
-                    silenceDetector.abort();
-                    finishRecording();
+            // Use Web Speech API for silence detection
+            const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+            const detector = new SR();
+            detector.continuous = true;
+            detector.interimResults = true;
+            detector.lang = 'en-US';
+
+            detector.onresult = () => {
+                clearTimeout(silenceTimer);
+                silenceTimer = setTimeout(() => {
+                    detector.abort();
+                    finishQuestionRecording();
+                }, SILENCE_TIMEOUT);
+            };
+
+            detector.onerror = (e) => {
+                if (e.error === 'no-speech') {
+                    setTimeout(() => { detector.abort(); finishQuestionRecording(); }, SILENCE_TIMEOUT);
                 }
-            }, 30000);
+            };
+
+            detector.onend = () => {
+                if (isRecording) { clearTimeout(silenceTimer); finishQuestionRecording(); }
+            };
+
+            detector.start();
+
+            // Safety: max 30s
+            setTimeout(() => { if (isRecording) { detector.abort(); finishQuestionRecording(); } }, 30000);
 
         } catch (err) {
             voiceStatus.textContent = 'Mic error: ' + err.message;
-            returnToWakeWordMode();
+            resumeListening();
         }
     }
 
-    function finishRecording() {
+    function finishQuestionRecording() {
         if (!isRecording || !mediaRecorder) return;
         isRecording = false;
         clearTimeout(silenceTimer);
 
         const elapsed = Date.now() - recordingStartTime;
         if (elapsed < MIN_RECORDING_MS) {
-            voiceStatus.textContent = 'Too short, try again. Say "hey tutor" first.';
-            returnToWakeWordMode();
+            voiceStatus.textContent = 'Too short. Try again.';
+            resumeListening();
             return;
         }
 
         voiceDot.classList.remove('heard');
-        voiceStatus.textContent = 'Processing your speech...';
+        voiceStatus.textContent = 'Processing with Whisper...';
 
         mediaRecorder.onstop = async () => {
             const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
             if (audioBlob.size < 1000) {
-                voiceStatus.textContent = 'No speech detected. Say "hey tutor" to try again.';
-                returnToWakeWordMode();
+                voiceStatus.textContent = 'No speech detected.';
+                resumeListening();
                 return;
             }
-            await sendVoice(audioBlob);
+            await sendVoiceToWhisper(audioBlob);
         };
         mediaRecorder.stop();
     }
 
-    async function sendVoice(audioBlob) {
+    async function sendVoiceToWhisper(audioBlob) {
         const srtFile = document.getElementById('srtSelect').value;
         const subIdx = currentSubIndex >= 0 ? subtitles[currentSubIndex].index : -1;
 
@@ -896,48 +942,84 @@
 
             if (data.error) {
                 voiceStatus.textContent = 'Error: ' + data.error;
-                returnToWakeWordMode();
+                resumeListening();
                 return;
             }
 
             logVoice('You said: "' + data.user_text + '"');
 
-            // Handle playback commands
+            // If Whisper detected a command, handle it
             if (data.command !== 'NONE') {
                 handleCommand(data.command);
-                returnToWakeWordMode();
+                resumeListening();
                 return;
             }
 
-            // Show text response in chat
-            switchTab('chat', document.querySelectorAll('.tab-bar button')[2]);
-            addChatMsg('user', escHtml(data.user_text));
-            addChatMsg('assistant', renderMarkdown(data.response_text));
-            chatHistory.push({ role: 'user', content: data.user_text });
-            chatHistory.push({ role: 'assistant', content: data.response_text });
-
-            // Play TTS audio response
-            if (data.audio_base64) {
-                voiceStatus.textContent = 'Tutor is speaking...';
-                voiceDot.classList.add('heard');
-                ttsAudio.src = 'data:audio/mp3;base64,' + data.audio_base64;
-                ttsAudio.play();
-                ttsAudio.onended = () => {
-                    voiceDot.classList.remove('heard');
-                    returnToWakeWordMode();
-                };
-            } else {
-                returnToWakeWordMode();
-            }
+            showResponse(data);
         } catch (err) {
             voiceStatus.textContent = 'Error: ' + err.message;
-            returnToWakeWordMode();
+            resumeListening();
         }
     }
 
-    function returnToWakeWordMode() {
+    async function handleQuestionText(question) {
+        // Send text question directly (no Whisper needed, already transcribed by Web Speech API)
+        const srtFile = document.getElementById('srtSelect').value;
+        const subIdx = currentSubIndex >= 0 ? subtitles[currentSubIndex].index : -1;
+
+        voiceStatus.textContent = 'Thinking...';
+
+        try {
+            // Use the chat endpoint with nearby context
+            const resp = await fetch('/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question, history: chatHistory, srt_file: srtFile })
+            });
+            const data = await resp.json();
+
+            if (data.error) {
+                voiceStatus.textContent = 'Error: ' + data.error;
+                resumeListening();
+                return;
+            }
+
+            switchTab('chat', document.querySelectorAll('.tab-bar button')[2]);
+            addChatMsg('user', escHtml(question));
+            addChatMsg('assistant', renderMarkdown(data.answer));
+            chatHistory.push({ role: 'user', content: question });
+            chatHistory.push({ role: 'assistant', content: data.answer });
+            resumeListening();
+        } catch (err) {
+            voiceStatus.textContent = 'Error: ' + err.message;
+            resumeListening();
+        }
+    }
+
+    function showResponse(data) {
+        switchTab('chat', document.querySelectorAll('.tab-bar button')[2]);
+        addChatMsg('user', escHtml(data.user_text));
+        addChatMsg('assistant', renderMarkdown(data.response_text));
+        chatHistory.push({ role: 'user', content: data.user_text });
+        chatHistory.push({ role: 'assistant', content: data.response_text });
+
+        if (data.audio_base64) {
+            voiceStatus.textContent = 'Tutor is speaking...';
+            voiceDot.classList.add('heard');
+            ttsAudio.src = 'data:audio/mp3;base64,' + data.audio_base64;
+            ttsAudio.play();
+            ttsAudio.onended = () => {
+                voiceDot.classList.remove('heard');
+                resumeListening();
+            };
+        } else {
+            resumeListening();
+        }
+    }
+
+    function resumeListening() {
         if (handsFreeActive) {
-            setTimeout(() => startWakeWordListener(), 300);
+            setTimeout(() => startSpeechListener(), 300);
         }
     }
 

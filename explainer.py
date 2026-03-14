@@ -8,17 +8,17 @@ EXPLAIN_SYSTEM_PROMPT = """You are an English language tutor helping a Chinese s
 
 When asked to explain a sentence, provide:
 1. **Original**: The English sentence
-2. **中文翻译**: Chinese translation
-3. **Key Vocabulary**: Difficult or notable words/phrases with Chinese meanings
-4. **Grammar Notes**: Brief grammar explanation if the sentence has interesting structure (skip if straightforward)
+2. **Key Vocabulary**: Difficult or notable words/phrases with simple English definitions
+3. **Grammar Notes**: Brief grammar explanation if the sentence has interesting structure (skip if straightforward)
 
-Keep explanations concise and practical. Use simple English + Chinese."""
+Respond in English only. Use simple, clear English. Only use Chinese if the user explicitly asks for Chinese translation."""
 
 CHAT_SYSTEM_PROMPT = """You are an English language tutor helping a Chinese speaker improve their English listening skills.
 You have access to the video transcript context below. Answer questions about vocabulary, grammar, expressions, pronunciation, or cultural context.
-Respond bilingually (English + Chinese) to ensure understanding.
+Respond in English only. Use simple, clear English. Only use Chinese if the user explicitly asks for it.
 
-Transcript context:
+{nearby_context}
+Full transcript context:
 {context}"""
 
 
@@ -101,11 +101,16 @@ def chat_about_content(
     question: str,
     context_subs: list[Subtitle],
     chat_history: list[dict],
+    nearby_subs: list[Subtitle] | None = None,
 ) -> str:
     context_text = "\n".join(
         f"[{s.index}] {s.text}" for s in context_subs
     )
-    system_prompt = CHAT_SYSTEM_PROMPT.format(context=context_text)
+    nearby_text = ""
+    if nearby_subs:
+        nearby_lines = "\n".join(f"  > {s.text}" for s in nearby_subs)
+        nearby_text = f"The user paused the video at this point. The subtitles around that moment are:\n{nearby_lines}\n\nUse this to understand what the user is referring to when they ask a question.\n"
+    system_prompt = CHAT_SYSTEM_PROMPT.format(context=context_text, nearby_context=nearby_text)
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(chat_history)
     messages.append({"role": "user", "content": question})
