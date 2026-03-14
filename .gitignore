@@ -1,0 +1,13 @@
+.env
+.env.swp
+*.swp
+__pycache__/
+static/
+*.pyc
+*.mp4
+*.mkv
+*.webm
+*.srt
+*.txt
+!requirements.txt
+.streamlit/
