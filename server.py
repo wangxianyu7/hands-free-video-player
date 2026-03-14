@@ -1,4 +1,4 @@
-"""Flask server for English Listening Practice app."""
+"""Flask server for HeyTutor app."""
 
 import glob
 import os
@@ -257,6 +257,6 @@ def voice_conversation():
 
 
 if __name__ == "__main__":
-    print("Starting English Listening Practice...")
+    print("Starting HeyTutor...")
     print("Open http://127.0.0.1:5000 in Chrome or Edge")
     app.run(host="127.0.0.1", port=5000, debug=True)

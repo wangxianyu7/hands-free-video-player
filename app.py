@@ -12,8 +12,8 @@ from video_server import get_video_url, start_video_server
 
 load_dotenv()
 
-st.set_page_config(page_title="English Listening Practice", layout="wide")
-st.title("English Listening Practice")
+st.set_page_config(page_title="HeyTutor", layout="wide")
+st.title("HeyTutor")
 
 
 # --- Session state init ---
